@@ -1,2 +1,1 @@
 # beautyscan-playground
-# beautyscan-playground
