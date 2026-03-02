@@ -1,16 +1,26 @@
 import streamlit as st
 import pandas as pd
 import vertexai
-from vertexai.generative_models import GenerativeModel, Part, Image
+import json
+from google.oauth2 import service_account
+from vertexai.generative_models import GenerativeModel, Part
 
 # --- CONFIGURATION ---
-PROJECT_ID = "your-google-cloud-project-id"  # <--- CHANGE THIS
-LOCATION = "us-central1" 
-vertexai.init(project=PROJECT_ID, location=LOCATION)
+PROJECT_ID = "sephora-data-gke-apps"
+LOCATION = "asia-southeast1"
+
+# AUTHENTICATION LOGIC
+if "google" in st.secrets:
+    credentials_info = json.loads(st.secrets["google"]["credentials"])
+    credentials = service_account.Credentials.from_service_account_info(credentials_info)
+    vertexai.init(project=PROJECT_ID, location=LOCATION, credentials=credentials)
+else:
+    vertexai.init(project=PROJECT_ID, location=LOCATION)
+
 model = GenerativeModel("gemini-1.5-pro-002")
 
 st.set_page_config(page_title="Skincare AI Scan", layout="wide")
-st.title("📸 AI Skin Scan & Recommendation")
+st.title("Beauty Scan Recommendations")
 
 # --- 1. DATA LOADING ---
 @st.cache_data
