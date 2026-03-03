@@ -32,25 +32,22 @@ def authenticate_gcp():
         return service_account.Credentials.from_service_account_file(env_path)
     return None
 
-# 1. Initialize Credentials
+# 1. AUTHENTICATION LOGIC
 credentials = authenticate_gcp()
 
-# 2. Set Environment Variables for the SDK (Crucial for Production)
+# 2. SET SYSTEM-WIDE ENVIRONMENT VARIABLES
+# These are picked up by the underlying Google GenAI SDK if init fails
 os.environ["GOOGLE_GENAI_USE_VERTEXAI"] = "true"
-if PROJECT_ID:
-    os.environ["GOOGLE_CLOUD_PROJECT"] = PROJECT_ID
-    os.environ["GOOGLE_PROJECT_ID"] = PROJECT_ID  # Some SDK versions look for this
+os.environ["GOOGLE_CLOUD_PROJECT"] = PROJECT_ID
+os.environ["GOOGLE_PROJECT_ID"] = PROJECT_ID
 
-# 3. Initialize Vertex AI
+# 3. INITIALIZE VERTEX AI GLOBALLY
+# This MUST happen before get_skincare_agent() is called
 vertexai.init(project=PROJECT_ID, location=LOCATION, credentials=credentials)
-
-# --- INITIALIZATION ---
-st.set_page_config(page_title="Sephora AI Skin Agent", layout="wide")
 
 @st.cache_resource
 def init_agent_system():
-    creds = authenticate_gcp()
-    agent = get_skincare_agent(credentials=creds)
+    agent = get_skincare_agent() 
     service = InMemorySessionService()
     return agent, service
 
