@@ -21,7 +21,6 @@ LOCATION = "us-central1"
 def authenticate_gcp():
     if "gcp_service_account" in st.secrets:
         creds_info = dict(st.secrets["gcp_service_account"])
-        # Create a temporary file to hold the JSON key for the SDK
         with tempfile.NamedTemporaryFile(mode='w', delete=False, suffix='.json') as temp_key:
             json.dump(creds_info, temp_key)
             os.environ["GOOGLE_APPLICATION_CREDENTIALS"] = temp_key.name
@@ -31,7 +30,6 @@ def authenticate_gcp():
 credentials = authenticate_gcp()
 os.environ["GOOGLE_GENAI_USE_VERTEXAI"] = "true"
 os.environ["GOOGLE_CLOUD_PROJECT"] = PROJECT_ID
-
 vertexai.init(project=PROJECT_ID, location=LOCATION, credentials=credentials)
 
 @st.cache_resource
@@ -53,18 +51,16 @@ async def run_agent_turn(query):
     try:
         await session_service.create_session(app_name=APP_NAME, user_id=USER_ID, session_id=SESSION_ID)
     except: pass 
-    
     runner = Runner(agent=root_agent, session_service=session_service, app_name=APP_NAME)
     new_msg = types.Content(role='user', parts=[types.Part(text=query)])
     final_text = ""
-    
     async for event in runner.run_async(user_id=USER_ID, session_id=SESSION_ID, new_message=new_msg):
         if event.is_final_response():
             if event.content and event.content.parts:
                 final_text = event.content.parts[0].text
     return final_text
 
-# --- UI STEPS (1 & 2) ---
+# --- STEP 1: MANDATORY ---
 if st.session_state.step == 1:
     st.header("Step 1: Your Skin Profile (Mandatory)")
     with st.form("mandatory_form"):
@@ -81,6 +77,7 @@ if st.session_state.step == 1:
             st.session_state.step = 2
             st.rerun()
 
+# --- STEP 2: PERSONALIZATION (RESTORED FIELDS) ---
 elif st.session_state.step == 2:
     st.header("Step 2: Personalize Your Results (Optional)")
     with st.form("optional_form"):
@@ -89,93 +86,98 @@ elif st.session_state.step == 2:
             age = st.number_input("Age", 0, 120, 25)
             ethnicity = st.text_input("Ethnicity", placeholder="e.g. South Asian")
             pregnancy = st.selectbox("Are you pregnant or breastfeeding?", ["No", "Yes"])
+            sun_exposure = st.selectbox("Daily Sun Exposure", ["Low", "Medium", "High"])
         with col2:
-            preferred_steps = st.selectbox("Routine Steps Preference", [3, 4, 5, 6], index=1)
+            preferred_steps = st.selectbox("How many steps do you prefer?", [3, 4, 5, 6], index=1)
             customer_priority = st.text_input("Main Priority", placeholder="e.g. Hyperpigmentation")
+            current_routine = st.text_area("Current Routine", placeholder="List products you use now...")
+            other_preferences = st.text_area("Other Preferences", placeholder="Allergies, specific brands, etc.")
         
-        if st.form_submit_button("Generate Routine"):
-            st.session_state.form_data.update({"age": age, "ethnicity": ethnicity, "pregnancy": pregnancy, "preferred_steps": preferred_steps, "customer_priority": customer_priority})
+        btn1, btn2 = st.columns(2)
+        with btn1:
+            submit = st.form_submit_button("Generate Routine")
+        with btn2:
+            skip = st.form_submit_button("Skip & Generate Now")
+        
+        if submit or skip:
+            if submit:
+                st.session_state.form_data.update({
+                    "age": age, "ethnicity": ethnicity, "pregnancy": pregnancy, 
+                    "sun_exposure": sun_exposure, "customer_priority": customer_priority, 
+                    "current_routine": current_routine, "other_preferences": other_preferences,
+                    "preferred_steps": preferred_steps
+                })
+            else:
+                st.session_state.form_data.update({
+                    "age": 25, "sun_exposure": "Medium", "preferred_steps": 4 
+                })
             st.session_state.step = 3
             st.rerun()
 
-# --- STEP 3: LOGIC & OUTPUT ---
+# --- STEP 3: REFINED OUTPUT ---
 elif st.session_state.step == 3:
-    st.header("✨ Your Structured Sephora Routine")
+    st.header("✨ Your Personalized Sephora Routine")
     d = st.session_state.form_data
     
-    with st.spinner("Curating your personalized Sephora catalog..."):
+    with st.spinner("Curating from the Sephora Catalog..."):
         try:
             catalog_df = pd.read_csv('skincat.csv')
-            
             def get_refined_catalog(df, user_data):
-                def parse_meta(x):
-                    try:
-                        meta = json.loads(x)
-                        return {item['filter_name']: [v.lower() for v in item['filter_values']] for item in meta}
-                    except: return {}
-
-                df['parsed_meta'] = df['filters_json'].apply(parse_meta)
                 user_skin = user_data['skin_type'].lower()
-                
-                strict_mask = df['parsed_meta'].apply(lambda m: user_skin in m.get('Skin Type', []))
-                results = df[strict_mask].copy()
-
-                if results.empty: results = df.head(50).copy()
-                
                 daily_seed = int(pd.Timestamp.now().strftime('%Y%m%d'))
-                results = results.sample(frac=1, random_state=daily_seed)
-                return results.head(40) 
+                results = df[df['filters_json'].str.contains(user_skin, case=False, na=False)].copy()
+                if results.empty: results = df.head(50).copy()
+                return results.sample(frac=1, random_state=daily_seed).head(40)
 
             refined_df = get_refined_catalog(catalog_df, d)
             catalog_context = refined_df[['brand', 'Product']].to_string(index=False)
         except Exception as e:
             st.error(f"Catalog Error: {e}")
-            catalog_context = "General Sephora List"
+            catalog_context = "Sephora Inventory"
 
-    # --- UPDATED 5-STEP STRUCTURE PROMPT ---
     agent_prompt = f"""
     ROLE: Senior Sephora Skincare Concierge.
     SOURCE: ONLY use products from this CATALOG:
     {catalog_context}
 
-    USER PROFILE: {d['skin_type']} skin, {d.get('age')}yo. Priority: {d.get('customer_priority')}.
+    USER DATA: 
+    - Skin: {d['skin_type']} (Hydration: {d['hydration']}, Sebum: {d['sebum']})
+    - Sun Exposure: {d.get('sun_exposure')}
+    - Current Routine: {d.get('current_routine')}
+    - Preferences: {d.get('other_preferences')}
+    - PREFERRED TOTAL STEPS: {d.get('preferred_steps')}
 
-    INSTRUCTION: Organize the routine using the 5 Sephora Routine Steps below.
-    For each chosen product, provide: **[Brand] - [Product Name]**, the 'Why' (linking to biomarkers), and the 'How' (application tips).
-
-    [SUMMARY_START]
-    Detailed analysis of user's skin profile.
-    [SUMMARY_END]
+    INSTRUCTION: Build a routine using the 5 Sephora Pillars. 
+    Balance the products to match the user's PREFERRED TOTAL STEPS ({d.get('preferred_steps')}).
+    
+    [SUMMARY_START] Detailed biomarker analysis. [SUMMARY_END]
 
     [ROUTINE_START]
     ### 🧼 1. Cleanse
     **Purpose**: Remove impurities such as excess sebum, dirt, sweat, makeup and sunscreen.
-    **Product Categories**: Makeup Remover, Facial Cleansers, Toners & Essence.
-    (Select 1-2 products)
-
+    **Categories**: Makeup Remover, Facial Cleansers, Toners & Essence.
+    
     ### 🧪 2. Treat
     **Purpose**: Address specific concerns - Correct, target, and rebalance skin.
-    **Product Categories**: Exfoliators, Masks, Serum and Oils.
-    (Select 1-2 products)
-
+    **Categories**: Exfoliators, Masks, Serum and Oils.
+    
     ### 💧 3. Moisturise
-    **Purpose**: Replenish, hydrate, and repair moisture barrier to maintain hydration.
-    **Product Categories**: Face/Eye/Lip Moisturisers & Hydrators.
-    (Select 1 product)
-
+    **Purpose**: Replenish, hydrate, and repair moisture barrier.
+    **Categories**: Face/Eye/Lip Moisturisers & Hydrators.
+    
     ### 🛡️ 4. Finish
     **Purpose**: Protect from sun damage, glow, blurring, and prepping.
-    **Product Categories**: SPF, BB & CC Cream, Facial Mists.
-    (Select 1 product)
-
+    **Categories**: SPF, BB & CC Cream, Facial Mists.
+    
     ### 🚀 5. Boost
     **Purpose**: Enhance daily routine or provide intensive care.
-    **Product Categories**: Tools, Devices, Supplements.
-    (Select 1 product if available)
+    **Categories**: Tools, Devices, Supplements.
+    
+    For each selected product, include: **[Brand] - [Product Name]**, 'Why' (ingredient logic), and 'How' (application).
     [ROUTINE_END]
     """
 
-    with st.spinner("AI is formulating your 5-step routine..."):
+    with st.spinner("AI is formulating your luxury 5-step routine..."):
         result = asyncio.run(run_agent_turn(agent_prompt))
         
         def extract(text, start, end):
@@ -185,16 +187,9 @@ elif st.session_state.step == 3:
         sum_out = extract(result, "[SUMMARY_START]", "[SUMMARY_END]")
         routine_out = extract(result, "[ROUTINE_START]", "[ROUTINE_END]")
 
-        if sum_out:
-            st.info(f"**Expert Analysis:** {sum_out}")
-            st.divider()
+        if sum_out: st.info(f"**Expert Analysis:** {sum_out}"); st.divider()
+        if routine_out: st.markdown(routine_out)
+        else: st.write(result)
 
-        if routine_out:
-            st.markdown(routine_out)
-        else:
-            st.error("Structure parsing error. Showing raw output:")
-            st.write(result)
-        
     if st.button("Start New Analysis"):
-        st.session_state.step = 1
-        st.rerun()
+        st.session_state.step = 1; st.rerun()
