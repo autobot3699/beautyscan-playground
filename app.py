@@ -19,19 +19,29 @@ LOCATION = "us-central1"
 
 def authenticate_gcp():
     try:
+        # Check Streamlit Cloud Secrets (Production)
         if "gcp_service_account" in st.secrets:
             creds_info = dict(st.secrets["gcp_service_account"])
             return service_account.Credentials.from_service_account_info(creds_info)
-    except FileNotFoundError:
+    except Exception:
         pass
     
+    # Check for local environment variable (Local Dev)
     env_path = os.getenv("GOOGLE_APPLICATION_CREDENTIALS")
     if env_path and os.path.exists(env_path):
         return service_account.Credentials.from_service_account_file(env_path)
     return None
 
+# 1. Initialize Credentials
 credentials = authenticate_gcp()
+
+# 2. Set Environment Variables for the SDK (Crucial for Production)
 os.environ["GOOGLE_GENAI_USE_VERTEXAI"] = "true"
+if PROJECT_ID:
+    os.environ["GOOGLE_CLOUD_PROJECT"] = PROJECT_ID
+    os.environ["GOOGLE_PROJECT_ID"] = PROJECT_ID  # Some SDK versions look for this
+
+# 3. Initialize Vertex AI
 vertexai.init(project=PROJECT_ID, location=LOCATION, credentials=credentials)
 
 # --- INITIALIZATION ---
@@ -39,12 +49,14 @@ st.set_page_config(page_title="Sephora AI Skin Agent", layout="wide")
 
 @st.cache_resource
 def init_agent_system():
+    # Pass credentials or initialize within the authenticated context
     agent = get_skincare_agent()
     service = InMemorySessionService()
     return agent, service
 
 root_agent, session_service = init_agent_system()
 
+# --- CONTINUED: SESSION STATE & LOGIC ---
 if 'step' not in st.session_state:
     st.session_state.step = 1
 if 'form_data' not in st.session_state:
@@ -58,18 +70,20 @@ async def run_agent_turn(query):
     SESSION_ID = st.session_state.session_id
     try:
         await session_service.create_session(app_name=APP_NAME, user_id=USER_ID, session_id=SESSION_ID)
-    except: pass 
+    except: 
+        pass 
+    
     runner = Runner(agent=root_agent, session_service=session_service, app_name=APP_NAME)
     new_msg = types.Content(role='user', parts=[types.Part(text=query)])
     final_text = ""
+    
     async for event in runner.run_async(user_id=USER_ID, session_id=SESSION_ID, new_message=new_msg):
         if event.is_final_response():
             if event.content and event.content.parts:
                 final_text = event.content.parts[0].text
     return final_text
 
-# --- UI STEPS ---
-
+# --- UI STEPS (1 & 2) ---
 if st.session_state.step == 1:
     st.header("Step 1: Your Skin Profile (Mandatory)")
     with st.form("mandatory_form"):
@@ -125,6 +139,7 @@ elif st.session_state.step == 2:
             st.session_state.step = 3
             st.rerun()
 
+# --- STEP 3: LOGIC & OUTPUT ---
 elif st.session_state.step == 3:
     st.header("✨ Your Personalized Sephora Routine")
     d = st.session_state.form_data
@@ -144,11 +159,9 @@ elif st.session_state.step == 3:
                 df['parsed_meta'] = df['filters_json'].apply(parse_meta)
                 user_skin = user_data['skin_type'].lower()
                 
-                # Filter strictly by Skin Type
                 strict_mask = df['parsed_meta'].apply(lambda m: user_skin in m.get('Skin Type', []))
                 results = df[strict_mask].copy()
 
-                # Relax if necessary
                 if len(results) < (target_steps + 4):
                     relaxed_mask = df['filters_json'].str.contains(user_skin, case=False, na=False)
                     results = df[relaxed_mask].copy()
@@ -156,10 +169,8 @@ elif st.session_state.step == 3:
                 if results.empty:
                     results = df.head(30).copy()
                 
-                # --- DAILY RANDOMIZATION LOGIC ---
-                # Generate a seed based on the current date (YYYYMMDD)
+                # DAILY RANDOMIZATION
                 daily_seed = int(pd.Timestamp.now().strftime('%Y%m%d'))
-                # Shuffle the results using this seed so everyone gets the same fresh variety today
                 results = results.sample(frac=1, random_state=daily_seed)
                 
                 return results.head(25) 
@@ -172,7 +183,6 @@ elif st.session_state.step == 3:
             st.error(f"Catalog Error: {e}")
             catalog_context = "No products found."
 
-    # --- REFINED AGENT PROMPT WITH HIGHER DETAIL INSTRUCTIONS ---
     agent_prompt = f"""
     ROLE: Senior Sephora Skincare Concierge.
     STRICT SOURCE OF TRUTH: You MUST ONLY use the products listed below. 
