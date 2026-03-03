@@ -150,7 +150,7 @@ elif st.session_state.step == 3:
     INSTRUCTION: Build a routine using the 5 Sephora Pillars. 
     Balance the products to match the user's PREFERRED TOTAL STEPS ({d.get('preferred_steps')}).
     
-    [SUMMARY_START] Detailed biomarker analysis. [SUMMARY_END]
+    [SUMMARY_START] Write a detailed 3-sentence analysis connecting biomarkers to skin health. [SUMMARY_END]
 
     [ROUTINE_START]
     ### 🧼 1. Cleanse
@@ -173,11 +173,14 @@ elif st.session_state.step == 3:
     **Purpose**: Enhance daily routine or provide intensive care.
     **Categories**: Tools, Devices, Supplements.
     
-    For each selected product, include: **[Brand] - [Product Name]**, 'Why' (ingredient logic), and 'How' (application).
+    For each selected product, include: 
+    - **[Brand] – [Product Name]**
+    - **Why**: [Detailed explanation of ingredients vs user's skin biomarkers]
+    - **Step by Step Method to Apply**: [2-3 detailed application tips in cohesion with other products]
     [ROUTINE_END]
     """
 
-    with st.spinner("AI is formulating your luxury 5-step routine..."):
+    with st.spinner("We're formulating your 5-step routine..."):
         result = asyncio.run(run_agent_turn(agent_prompt))
         
         def extract(text, start, end):
