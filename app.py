@@ -1,3 +1,4 @@
+import tempfile
 import streamlit as st
 import pandas as pd
 import asyncio
@@ -18,33 +19,27 @@ PROJECT_ID = "sephora-data-gke-apps"
 LOCATION = "us-central1"
 
 def authenticate_gcp():
-    try:
-        # Check Streamlit Cloud Secrets (Production)
-        if "gcp_service_account" in st.secrets:
-            creds_info = dict(st.secrets["gcp_service_account"])
-            return service_account.Credentials.from_service_account_info(creds_info)
-    except Exception:
-        pass
-    
-    # Check for local environment variable (Local Dev)
-    env_path = os.getenv("GOOGLE_APPLICATION_CREDENTIALS")
-    if env_path and os.path.exists(env_path):
-        return service_account.Credentials.from_service_account_file(env_path)
+    if "gcp_service_account" in st.secrets:
+        creds_info = dict(st.secrets["gcp_service_account"])
+        
+        # 1. Create a temporary file to hold the JSON key
+        # This is the "Magic Bullet" to stop the metadata server search
+        with tempfile.NamedTemporaryFile(mode='w', delete=False, suffix='.json') as temp_key:
+            json.dump(creds_info, temp_key)
+            os.environ["GOOGLE_APPLICATION_CREDENTIALS"] = temp_key.name
+        
+        return service_account.Credentials.from_service_account_info(creds_info)
     return None
 
-# 1. AUTHENTICATION LOGIC
+# 1. Authenticate and set the environment variable
 credentials = authenticate_gcp()
 
-# 2. SET SYSTEM-WIDE ENVIRONMENT VARIABLES
-# These are picked up by the underlying Google GenAI SDK if init fails
+# 2. Set strict environment variables for GenAI SDK
 os.environ["GOOGLE_GENAI_USE_VERTEXAI"] = "true"
 os.environ["GOOGLE_CLOUD_PROJECT"] = PROJECT_ID
-os.environ["GOOGLE_PROJECT_ID"] = PROJECT_ID
 
-# 3. INITIALIZE VERTEX AI GLOBALLY
-# This MUST happen before get_skincare_agent() is called
+# 3. Global Init
 vertexai.init(project=PROJECT_ID, location=LOCATION, credentials=credentials)
-
 @st.cache_resource
 def init_agent_system():
     agent = get_skincare_agent() 
