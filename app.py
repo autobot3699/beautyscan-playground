@@ -49,8 +49,8 @@ st.set_page_config(page_title="Sephora AI Skin Agent", layout="wide")
 
 @st.cache_resource
 def init_agent_system():
-    # Pass credentials or initialize within the authenticated context
-    agent = get_skincare_agent()
+    creds = authenticate_gcp()
+    agent = get_skincare_agent(credentials=creds)
     service = InMemorySessionService()
     return agent, service
 
