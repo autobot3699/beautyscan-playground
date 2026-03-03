@@ -3,7 +3,6 @@ from google.adk.tools import agent_tool
 from google.adk.tools.google_search_tool import GoogleSearchTool
 
 def get_skincare_agent():
-    # Only one sub-agent for web-tasks. This is fast.
     web_agent = LlmAgent(
         name='web_specialist',
         model='gemini-2.5-flash',

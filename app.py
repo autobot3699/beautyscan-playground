@@ -3,19 +3,36 @@ import pandas as pd
 import asyncio
 import uuid
 import os
-import vertexai
 import json
+import vertexai
+from google.oauth2 import service_account
+from google.genai import types
+
+# ADK Specific Imports
 from google.adk.runners import Runner
 from google.adk.sessions import InMemorySessionService
-from google.genai import types
 from agent_setup import get_skincare_agent
 
 # --- GCP CONFIGURATION ---
 PROJECT_ID = "sephora-data-gke-apps"
-LOCATION = "us-central1" 
+LOCATION = "us-central1"
 
+def authenticate_gcp():
+    try:
+        if "gcp_service_account" in st.secrets:
+            creds_info = dict(st.secrets["gcp_service_account"])
+            return service_account.Credentials.from_service_account_info(creds_info)
+    except FileNotFoundError:
+        pass
+    
+    env_path = os.getenv("GOOGLE_APPLICATION_CREDENTIALS")
+    if env_path and os.path.exists(env_path):
+        return service_account.Credentials.from_service_account_file(env_path)
+    return None
+
+credentials = authenticate_gcp()
 os.environ["GOOGLE_GENAI_USE_VERTEXAI"] = "true"
-vertexai.init(project=PROJECT_ID, location=LOCATION)
+vertexai.init(project=PROJECT_ID, location=LOCATION, credentials=credentials)
 
 # --- INITIALIZATION ---
 st.set_page_config(page_title="Sephora AI Skin Agent", layout="wide")
@@ -79,7 +96,6 @@ elif st.session_state.step == 2:
             pregnancy = st.selectbox("Are you pregnant or breastfeeding?", ["No", "Yes"])
             sun_exposure = st.selectbox("Daily Sun Exposure", ["Low", "Medium", "High"])
         with col2:
-            # NEW PREFERENCE FIELD
             preferred_steps = st.selectbox("How many steps do you usually prefer in your skincare routine?", [3, 4, 5, 6], index=1)
             customer_priority = st.text_input("Main Priority", placeholder="e.g. Hyperpigmentation")
             current_routine = st.text_area("Current Routine")
@@ -100,12 +116,11 @@ elif st.session_state.step == 2:
                     "preferred_steps": preferred_steps
                 })
             else:
-                # Default values for skip
                 st.session_state.form_data.update({
                     "age": 25, "ethnicity": "Not Specified", "pregnancy": "No", 
                     "sun_exposure": "Medium", "customer_priority": "General Health", 
                     "current_routine": "None", "other_preferences": "None",
-                    "preferred_steps": 4 # Default to 4 steps if skipped
+                    "preferred_steps": 4 
                 })
             st.session_state.step = 3
             st.rerun()
@@ -114,85 +129,112 @@ elif st.session_state.step == 3:
     st.header("✨ Your Personalized Sephora Routine")
     d = st.session_state.form_data
     
-    with st.spinner("Applying custom filtering logic..."):
+    with st.spinner("Searching for the perfect products..."):
         try:
             catalog_df = pd.read_csv('skincat.csv')
-            def match_sephora_metadata(row_json, user_data):
-                try:
-                    meta = json.loads(row_json)
-                    flat_meta = {item['filter_name']: item['filter_values'] for item in meta}
-                    return user_data['skin_type'] in flat_meta.get('Skin Type', [])
-                except: return False
-            mask = catalog_df['filter_metadata'].apply(lambda x: match_sephora_metadata(x, d))
-            # Increase head count to ensure agent has enough variety to pick 3-6 products
-            catalog_context = catalog_df[mask].head(20).to_string(index=False)
-        except: catalog_context = "Catalog items."
+            target_steps = d.get('preferred_steps', 4)
+            
+            def get_refined_catalog(df, user_data):
+                def parse_meta(x):
+                    try:
+                        meta = json.loads(x)
+                        return {item['filter_name']: [v.lower() for v in item['filter_values']] for item in meta}
+                    except: return {}
 
-    # UPDATED PROMPT WITH PREFERRED STEPS
+                df['parsed_meta'] = df['filters_json'].apply(parse_meta)
+                user_skin = user_data['skin_type'].lower()
+                
+                # Filter strictly by Skin Type
+                strict_mask = df['parsed_meta'].apply(lambda m: user_skin in m.get('Skin Type', []))
+                results = df[strict_mask].copy()
+
+                # Relax if necessary
+                if len(results) < (target_steps + 4):
+                    relaxed_mask = df['filters_json'].str.contains(user_skin, case=False, na=False)
+                    results = df[relaxed_mask].copy()
+
+                if results.empty:
+                    results = df.head(30).copy()
+                
+                # --- DAILY RANDOMIZATION LOGIC ---
+                # Generate a seed based on the current date (YYYYMMDD)
+                daily_seed = int(pd.Timestamp.now().strftime('%Y%m%d'))
+                # Shuffle the results using this seed so everyone gets the same fresh variety today
+                results = results.sample(frac=1, random_state=daily_seed)
+                
+                return results.head(25) 
+
+            refined_df = get_refined_catalog(catalog_df, d)
+            catalog_context = refined_df[['brand', 'Product']].to_string(index=False)
+            st.caption(f"Found {len(refined_df)} products matching your profile.")
+
+        except Exception as e:
+            st.error(f"Catalog Error: {e}")
+            catalog_context = "No products found."
+
+    # --- REFINED AGENT PROMPT WITH HIGHER DETAIL INSTRUCTIONS ---
     agent_prompt = f"""
     ROLE: Senior Sephora Skincare Concierge.
-    USER BIOMETRICS: {d['skin_type']} | Hydration: {d['hydration']}/100, Sebum: {d['sebum']}/100, Pores: {d['pores']}/100, Lines: {d['lines']}/100.
-    CONTEXT: {d.get('age')}yo, {d.get('ethnicity')}, Pregnancy: {d.get('pregnancy')}, Sun: {d.get('sun_exposure')}.
-    PREFERENCE: User prefers a {d.get('preferred_steps')}-step routine.
+    STRICT SOURCE OF TRUTH: You MUST ONLY use the products listed below. 
     
-    CATALOG: {catalog_context}
+    CATALOG LIST:
+    {catalog_context}
 
-    INSTRUCTIONS: Build a luxury routine. Use ONLY products in the catalog.
-    
-    OUTPUT FORMAT:
-    You must wrap sections in these EXACT markers:
+    USER DATA: {d['skin_type']} skin, {d.get('age')}yo, Hydration: {d['hydration']}/100.
+    PREFERENCE: Exactly {target_steps} steps.
+
+    OUTPUT FORMAT (DO NOT MISS ANY SECTION):
     [SUMMARY_START]
-    (2-3 sentences connecting biomarkers to lifestyle/ethnicity)
+    Write a detailed 3-sentence analysis connecting biomarkers to skin health.
     [SUMMARY_END]
 
     [MORNING_START]
     ☀️ Morning Routine: [Theme Name] | Goal: [Functional Goal]
-    (Generate exactly {d.get('preferred_steps')} steps/products for this routine)
-    - [Step]: [Brand] – [Product Name] | Why: [Specific Ingredients vs Biomarkers]
-    Step by Step Method to Apply: [Tips]
+    For each of the {target_steps} products, you MUST include:
+    - **[Brand] – [Product Name]**
+    - **Why**: [Detailed explanation of ingredients vs user's skin biomarkers]
+    - **Step by Step Method to Apply**: [2-3 detailed luxury application tips]
     [MORNING_END]
 
     [EVENING_START]
     🌙 Evening Routine: [Theme Name] | Goal: [Repair Goal]
-    (Generate exactly {d.get('preferred_steps')} steps/products for this routine)
-    - [Step]: [Brand] – [Product Name] | Why: [Night Repair Logic]
-    Step by Step Method to Apply: [Tips]
+    For each of the {target_steps} products, you MUST include:
+    - **[Brand] – [Product Name]**
+    - **Why**: [Detailed night repair logic for dry/oily/combination skin]
+    - **Step by Step Method to Apply**: [2-3 detailed luxury application tips]
     [EVENING_END]
-
-    STRICT: Use 'web_specialist' (Google Search) ONLY for pregnancy safety.
     """
-    
-    with st.spinner("Our AI Agent is formulating your routine..."):
+
+    with st.spinner("AI Agent is formulating your detailed skincare routine..."):
         result = asyncio.run(run_agent_turn(agent_prompt))
         
-        def get_section(text, start_marker, end_marker):
-            try:
-                return text.split(start_marker)[1].split(end_marker)[0].strip()
-            except: return None
+        def extract(text, start, end):
+            try: 
+                content = text.split(start)[1].split(end)[0].strip()
+                return content
+            except: return ""
 
-        summary = get_section(result, "[SUMMARY_START]", "[SUMMARY_END]")
-        morning = get_section(result, "[MORNING_START]", "[MORNING_END]")
-        evening = get_section(result, "[EVENING_START]", "[EVENING_END]")
+        sum_out = extract(result, "[SUMMARY_START]", "[SUMMARY_END]")
+        am_out = extract(result, "[MORNING_START]", "[MORNING_END]")
+        pm_out = extract(result, "[EVENING_START]", "[EVENING_END]")
 
-        if summary:
-            st.markdown("### 📝 Analysis Summary")
-            st.info(summary)
+        if sum_out:
+            st.info(f"**Skin Analysis:** {sum_out}")
             st.divider()
 
-        if morning:
-            st.markdown("### ☀️ Morning Routine")
+        if am_out:
+            st.subheader("☀️ Morning Routine")
             with st.container(border=True):
-                st.markdown(morning)
-            st.write("")
+                st.markdown(am_out)
 
-        if evening:
-            st.markdown("### 🌙 Evening Routine")
+        if pm_out:
+            st.subheader("🌙 Evening Routine")
             with st.container(border=True):
-                st.markdown(evening)
+                st.markdown(pm_out)
 
-        if not summary and not morning:
-            st.warning("Routine generated in non-standard format.")
-            st.markdown(result)
+        if not am_out:
+            st.error("The agent failed to generate the routine format. Raw output below:")
+            st.write(result)
         
     if st.button("Start New Analysis"):
         st.session_state.step = 1
