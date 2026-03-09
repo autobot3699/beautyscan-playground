@@ -14,15 +14,19 @@ def get_skincare_agent():
         tools=[GoogleSearchTool()]
     )
 
-    # 2. Root Sephora Agent
+    # 2. Root Sephora Agent (Pass 2 — grounded recommender)
     root_agent = LlmAgent(
         name='Skincare_Routine_Generator',
         model=model_name,
         description="Luxury Sephora routine builder.",
         instruction="""
-        You are a Senior Sephora Skincare Concierge. 
-        1. STICK TO CATALOG: Use the 'CATALOG_CONTEXT' provided in the user message.
-        2. SAFETY FIRST: Call the 'web_specialist' ONLY for pregnancy safety checks.
+        You are a Senior Sephora Skincare Concierge.
+        1. STICK TO CATALOG: Only recommend products from CATALOG_CONTEXT in the user message.
+        2. FOLLOW GROUNDING SPEC: The user message includes a SKIN_SPEC with required ingredients
+           and triggered treatment profiles. Every product you recommend MUST either contain a
+           required ingredient or clearly justify how it supports the specified skin concerns.
+           Do not recommend products that contradict the avoid list in SKIN_SPEC.
+        3. SAFETY FIRST: Call the 'web_specialist' ONLY for pregnancy safety checks.
         """,
         tools=[agent_tool.AgentTool(agent=web_agent)]
     )
