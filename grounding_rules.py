@@ -25,25 +25,25 @@ from __future__ import annotations
 
 PROFILE_RULES: list[dict] = [
     {
-        # Dry skin with very low hydration AND high sebum signals a
+        # Dry skin with low hydration AND elevated sebum signals a
         # compromised moisture barrier — prioritise humectants.
         "name": "Barrier Boost",
         "conditions": {
             "skin_type": {"eq": "Dry"},
-            "hydration": {"lt": 30},
-            "sebum":     {"gt": 70},
+            "hydration": {"lt": 60},
+            "sebum":     {"gt": 75},
         },
         "ingredients": [
             "Hyaluronic Acid",   # filters_json tag: "Hyaluronic Acid"
         ],
     },
     {
-        # Low lines score (high visible lines) triggers anti-ageing actives.
+        # Low lines score (visible lines) triggers anti-ageing actives.
         # Note: "Squalane" is the correct INCI name (user spec: Squalene).
         # "Retinoid" covers retinol/retinal variants.
         "name": "Firm Restore",
         "conditions": {
-            "lines": {"lt": 70},
+            "lines": {"lt": 71},
         },
         "ingredients": [
             "Peptides",          # filters_json tag: "Peptides"
@@ -57,7 +57,7 @@ PROFILE_RULES: list[dict] = [
         # and pore-minimising actives.
         "name": "Blemish Control",
         "conditions": {
-            "pores": {"lt": 70},
+            "pores": {"lt": 75},
         },
         "ingredients": [
             "BHA/Salicylic Acid",  # no direct tag — mapped to AHAs in prompt
@@ -65,12 +65,12 @@ PROFILE_RULES: list[dict] = [
         ],
     },
     {
-        # Oily skin with moderate sebum — keep blemish actives without
+        # Oily skin with active sebum — blemish actives without
         # the full Barrier Boost stack.
         "name": "Blemish Control",
         "conditions": {
             "skin_type": {"eq": "Oily"},
-            "sebum":     {"lt": 70},
+            "sebum":     {"lt": 75},
         },
         "ingredients": [
             "BHA/Salicylic Acid",
@@ -78,13 +78,13 @@ PROFILE_RULES: list[dict] = [
         ],
     },
     {
-        # Dry skin with moderate-to-low hydration and some sebum activity
+        # Dry skin with moderate-to-low hydration and minimal sebum activity
         # benefits from gentle exfoliation + brightening + barrier repair.
         "name": "Radiance Reset",
         "conditions": {
             "skin_type": {"eq": "Dry"},
-            "hydration": {"lt": 70},
-            "sebum":     {"gt": 30},
+            "hydration": {"lt": 80},
+            "sebum":     {"gt": 14},
         },
         "ingredients": [
             "AHA/Glycolic Acid",  # filters_json tag: "AHAs/Glycolic Acid"

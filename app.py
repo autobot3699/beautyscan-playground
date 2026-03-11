@@ -39,8 +39,8 @@ from agent_setup import get_skincare_agent
 from grounding_rules import derive_ingredient_spec
 
 # --- GCP CONFIGURATION ---
-PROJECT_ID = "sephora-data-gke-apps"
-LOCATION = "us-central1"
+PROJECT_ID = os.environ.get("GCP_PROJECT_ID", "sephora-data-gke-apps")
+LOCATION = os.environ.get("GCP_LOCATION", "us-central1")
 
 def authenticate_gcp():
     try:
@@ -198,40 +198,60 @@ def _score_labels(scores: dict) -> dict:
     }
 
 
-async def run_pass1(spec: dict, scores: dict) -> dict:
+async def run_pass1(spec: dict, scores: dict, client_concerns: list[str]) -> dict:
     """
     Lightweight LLM call that turns the rule-engine output (spec) into a
-    structured clinical skin brief consumed by Pass 2.
-    Returns a dict with keys: skin_brief, ingredient_rationale, priority_concerns.
+    structured expert analysis and skin brief consumed by Pass 2.
+
+    Returns a dict with keys:
+      strengths, areas_to_address, routine_plan,
+      ingredient_rationale, priority_concerns, skin_brief.
     """
-    profiles_str   = ', '.join(spec['profiles'])   if spec['profiles']   else 'None'
+    profiles_str    = ', '.join(spec['profiles'])             if spec['profiles']             else 'None'
     ingredients_str = ', '.join(spec['required_ingredients']) if spec['required_ingredients'] else 'None'
-    concerns_str   = ', '.join(spec['skin_concerns']) if spec['skin_concerns'] else 'None'
-    notes_str      = '; '.join(spec['notes'])       if spec['notes']      else 'None'
+    concerns_str    = ', '.join(spec['skin_concerns'])        if spec['skin_concerns']        else 'None'
+    notes_str       = '; '.join(spec['notes'])                if spec['notes']                else 'None'
+    client_concerns_str = ', '.join(client_concerns)          if client_concerns              else 'None'
+    is_pregnant     = str(scores.get('pregnancy', 'No')).lower() == 'yes'
     labels = _score_labels(scores)
 
-    prompt = f"""You are a clinical skin scientist. Given these structured skin biomarker rules:
+    prompt = f"""You are a warm, empathetic Beauty Advisor at Sephora. Avoid clinical jargon — speak directly to the client as "you", using accessible, reassuring language.
 
-Matched Treatment Profiles : {profiles_str}
-Required Ingredients        : {ingredients_str}
-Key Skin Concerns           : {concerns_str}
-Safety Notes                : {notes_str}
-
-Biomarker readings (scores are 0-100; higher = healthier / less concern):
+SKIN DATA:
   Skin Type : {scores['skin_type']}
   Hydration : {scores['hydration']}/100 → {labels['hydration']}
   Sebum     : {scores['sebum']}/100 → {labels['sebum']}
   Pores     : {scores['pores']}/100 → {labels['pores']}
   Lines     : {scores['lines']}/100 → {labels['lines']}
+  (All scores 0-100; higher = healthier / less concern. Above 60 = performing well.)
 
-Output ONLY valid JSON with this exact schema — no markdown, no commentary:
+TREATMENT CONTEXT:
+  Matched Skin Pillars : {profiles_str}
+  Key Ingredients      : {ingredients_str}
+  Biomarker Concerns   : {concerns_str}
+  Client Concerns      : {client_concerns_str}
+  Safety Notes         : {notes_str}
+  Pregnancy/BF         : {'Yes — only recommend pregnancy-safe ingredients' if is_pregnant else 'No'}
+
+Output ONLY valid JSON with this exact schema — no markdown fences, no commentary:
 {{
-  "skin_brief": "<2-sentence clinical summary of the skin condition and primary treatment direction>",
-  "beauty_advisor_narrative": "<3 sentences as a warm Beauty Advisor speaking directly to the client as 'you'. Sentence 1: describe what their skin is telling us right now using the biomarker scores. Sentence 2: explain what it needs most and why, referencing the triggered treatment profiles naturally. Sentence 3: reassure them that today's routine has been curated specifically for their skin.>",
-  "ingredient_rationale": {{
-    "<ingredient_name>": "<why this score demands this ingredient>"
+  "skin_brief": "<2-sentence internal summary of skin condition and treatment direction — used for downstream recommendation context, not shown to client>",
+  "strengths": "<One warm sentence identifying the biomarker scores above 60 and explaining in plain language why they form a positive foundation for the client's skin health. If none are above 60, acknowledge their skin's resilience instead.>",
+  "areas_to_address": [
+    "<First focus area: If the lowest biomarker score is below 60, describe it — name the score value and the visible everyday impact on complexion in plain, empathetic language (e.g. how dehydration shows up as tightness or fine 'thirst lines', how excess sebum makes pores more visible). If the lowest score is 60 or above and the client has self-reported concerns, lead with the most relevant self-reported concern instead and explain why it matters for their skin.>",
+    "<Second focus area: If the second-lowest biomarker score is below 60, describe it in the same format. If biomarker scores are broadly healthy (both ≥ 60) and the client has more than one self-reported concern, surface the next concern here. If there is no meaningful second gap or concern, return an empty string for this entry.>"
+  ],
+  "routine_plan": {{
+    "primary_pillar": "<Name of the primary skin pillar from Matched Skin Pillars>",
+    "secondary_pillar": "<Name of the secondary skin pillar, or 'None' if only one matched>",
+    "key_ingredients": ["<ingredient 1>", "<ingredient 2>", "<ingredient 3>", "<ingredient 4 if applicable>"],
+    "safety_note": "{'All recommended ingredients are pregnancy-safe.' if is_pregnant else ''}",
+    "rationale": "<2 sentences: explain how the primary and secondary pillars together address the gaps identified above, and how the key ingredients support them. Weave in the client's self-reported concerns naturally. Warm Beauty Advisor tone — no jargon.>"
   }},
-  "priority_concerns": ["<ranked list of concerns, most urgent first>"]
+  "ingredient_rationale": {{
+    "<ingredient_name>": "<one sentence: why this specific score or concern calls for this ingredient>"
+  }},
+  "priority_concerns": ["<ranked list of concerns most urgent first, blending biomarker gaps and client-reported concerns>"]
 }}"""
 
     client = genai.Client(vertexai=True, project=PROJECT_ID, location=LOCATION)
@@ -250,7 +270,9 @@ Output ONLY valid JSON with this exact schema — no markdown, no commentary:
     except (json.JSONDecodeError, AttributeError):
         return {
             "skin_brief": response.text if hasattr(response, 'text') else "",
-            "beauty_advisor_narrative": "",
+            "strengths": "",
+            "areas_to_address": [],
+            "routine_plan": {},
             "ingredient_rationale": {},
             "priority_concerns": spec['skin_concerns'],
         }
@@ -305,18 +327,21 @@ if st.session_state.step == 1:
 # ---------------------------------------------------------------------------
 elif st.session_state.step == 2:
     st.header("Step 2: Personalize Your Results (Optional)")
+    _CONCERN_OPTIONS = [
+        "Ageing", "Blackheads", "Dark Circles", "Dullness",
+        "Firmness & Elasticity", "Pigmentation & Dark Spots",
+        "Puffiness", "Uneven Skin Texture", "Uneven Skin Tone", "Redness",
+    ]
+
     with st.form("optional_form"):
-        col1, col2 = st.columns(2)
-        with col1:
-            age = st.number_input("Age", 0, 120, 25)
-            ethnicity = st.text_input("Ethnicity", placeholder="e.g. South Asian")
-            pregnancy = st.selectbox("Are you pregnant or breastfeeding?", ["No", "Yes"])
-            sun_exposure = st.selectbox("Daily Sun Exposure", ["Low", "Medium", "High"])
-        with col2:
-            preferred_steps = st.selectbox("How many steps do you prefer?", [3, 4, 5, 6], index=1)
-            customer_priority = st.text_input("Main Priority", placeholder="e.g. Hyperpigmentation")
-            current_routine = st.text_area("Current Routine", placeholder="List products you use now...")
-            other_preferences = st.text_area("Other Preferences", placeholder="Allergies, specific brands, etc.")
+        pregnancy = st.selectbox("Are you pregnant or breastfeeding?", ["No", "Yes"])
+        preferred_steps = st.selectbox("How many steps do you prefer?", [3, 4, 5, 6], index=1)
+        client_concerns = st.multiselect(
+            "Client Concerns (select up to 3)",
+            options=_CONCERN_OPTIONS,
+        )
+        if len(client_concerns) > 3:
+            st.warning("Please select a maximum of 3 concerns.")
 
         btn1, btn2 = st.columns(2)
         with btn1:
@@ -325,16 +350,19 @@ elif st.session_state.step == 2:
             skip = st.form_submit_button("Skip & Generate Now")
 
         if submit or skip:
+            if len(client_concerns) > 3:
+                st.error("Please select no more than 3 concerns before continuing.")
+                st.stop()
             if submit:
                 st.session_state.form_data.update({
-                    "age": age, "ethnicity": ethnicity, "pregnancy": pregnancy,
-                    "sun_exposure": sun_exposure, "customer_priority": customer_priority,
-                    "current_routine": current_routine, "other_preferences": other_preferences,
+                    "pregnancy": pregnancy,
                     "preferred_steps": preferred_steps,
+                    "client_concerns": client_concerns,
                 })
             else:
                 st.session_state.form_data.update({
-                    "age": 25, "sun_exposure": "Medium", "preferred_steps": 4,
+                    "preferred_steps": 4,
+                    "client_concerns": [],
                 })
             st.session_state.step = 3
             st.rerun()
@@ -355,7 +383,6 @@ elif st.session_state.step == 3:
         "sebum":     d["sebum"],
         "pores":     d["pores"],
         "lines":     d["lines"],
-        "age":       d.get("age", 25),
         "pregnancy": d.get("pregnancy", "No"),
     }
     spec = derive_ingredient_spec(scores)
@@ -387,11 +414,36 @@ elif st.session_state.step == 3:
     # Pass 1 — Skin brief synthesis
     # ------------------------------------------------------------------
     with st.spinner("Pass 1: Analysing your skin biomarkers..."):
-        skin_brief = asyncio.run(run_pass1(spec, scores))
+        skin_brief = asyncio.run(run_pass1(spec, scores, d.get("client_concerns") or []))
 
-    advisor_narrative = skin_brief.get("beauty_advisor_narrative", "")
-    if advisor_narrative:
-        st.info(f"**Expert Analysis:** {advisor_narrative}")
+    strengths       = skin_brief.get("strengths", "")
+    areas           = skin_brief.get("areas_to_address", [])
+    routine_plan    = skin_brief.get("routine_plan", {})
+
+    if strengths or areas or routine_plan:
+        st.subheader("Your Skin Expert Analysis")
+        if strengths:
+            st.markdown(f"- 💚 **What's working for you:** {strengths}")
+        if any(areas):
+            st.markdown("- ⚠️ **Areas we're focusing on:**")
+            for item in areas:
+                if item:
+                    st.markdown(f"  - {item}")
+        if routine_plan:
+            primary   = routine_plan.get("primary_pillar", "")
+            secondary = routine_plan.get("secondary_pillar", "")
+            pillars   = " + ".join(p for p in [primary, secondary] if p and p != "None")
+            ingredients = ", ".join(routine_plan.get("key_ingredients", []))
+            safety    = routine_plan.get("safety_note", "")
+            rationale = routine_plan.get("rationale", "")
+            st.markdown("- 🧴 **Your personalised routine plan:**")
+            if pillars:
+                st.markdown(f"  - **Skin Pillars:** {pillars}")
+            if ingredients:
+                safety_tag = f" *({safety})*" if safety else ""
+                st.markdown(f"  - **Key ingredients:** {ingredients}{safety_tag}")
+            if rationale:
+                st.markdown(f"  - {rationale}")
         st.divider()
 
     # ------------------------------------------------------------------
@@ -425,16 +477,15 @@ elif st.session_state.step == 3:
         Sebum {d['sebum']}/100 → {labels['sebum']}
         Pores {d['pores']}/100 → {labels['pores']}
         Lines {d['lines']}/100 → {labels['lines']}
-    - Sun Exposure: {d.get('sun_exposure')}
-    - Current Routine: {d.get('current_routine')}
-    - Preferences: {d.get('other_preferences')}
+    - Client Concerns (self-reported, ranked by selection order): {', '.join(d.get('client_concerns') or []) or 'None'}
     - PREFERRED TOTAL STEPS: {d.get('preferred_steps')}
 
     INSTRUCTION: Build a routine using the 5 Sephora Pillars.
     MANDATORY: Every pillar (Cleanse, Treat, Moisturise, Finish, Boost) MUST have at least one product.
     No pillar may be left empty — if the catalog doesn't perfectly match a pillar, choose the best available fit and explain why it serves that step.
     Distribute the remaining products across pillars to reach the user's PREFERRED TOTAL STEPS ({d.get('preferred_steps')}).
-    For each product, "Why" MUST explain how its key ingredients address the client's specific skin scores and concerns. Use warm, client-facing Beauty Advisor language. Never mention "SKIN_SPEC", "grounding spec", "triggered profiles", or any internal labels.
+    CLIENT CONCERNS PRIORITY: When multiple catalog products could fill a slot, prefer the one that most directly addresses the client's self-reported concerns ({', '.join(d.get('client_concerns') or []) or 'None'}). For each product, the "Why" MUST explicitly connect its key ingredients to BOTH the client's biomarker scores AND any relevant self-reported concerns. If a concern is addressed, name it directly in the "Why" copy.
+    Use warm, client-facing Beauty Advisor language. Never mention "SKIN_SPEC", "grounding spec", "triggered profiles", or any internal labels.
 
     [ROUTINE_START]
     ### 🧼 1. Cleanse
